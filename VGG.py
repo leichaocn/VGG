@@ -1,23 +1,20 @@
-#%%
-# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+#构造一个VGGNet-16的网络结构，计算forward和backward的耗时
+
+# region 载入库和配置参数
 from datetime import datetime
 import math
 import time
 import tensorflow as tf
+# batch_size越大越慢,到10个就会内存不足.
+# batch_size=32
+# num_batches=100
+batch_size=1
+num_batches=20
+# endregion
 
+# region 计算图构建函数
+
+# 卷积定义函数
 def conv_op(input_op, name, kh, kw, n_out, dh, dw, p):
     n_in = input_op.get_shape()[-1].value
 
@@ -34,6 +31,7 @@ def conv_op(input_op, name, kh, kw, n_out, dh, dw, p):
         p += [kernel, biases]
         return activation
 
+# 全连接层定义函数
 def fc_op(input_op, name, n_out, p):
     n_in = input_op.get_shape()[-1].value
 
@@ -46,7 +44,7 @@ def fc_op(input_op, name, n_out, p):
         activation = tf.nn.relu_layer(input_op, kernel, biases, name=scope)
         p += [kernel, biases]
         return activation
-
+# 最大池化层定义函数
 def mpool_op(input_op, name, kh, kw, dh, dw):
     return tf.nn.max_pool(input_op,
                           ksize=[1, kh, kw, 1],
@@ -54,7 +52,7 @@ def mpool_op(input_op, name, kh, kw, dh, dw):
                           padding='SAME',
                           name=name)
 
-
+# 计算图构建主函数
 def inference_op(input_op, keep_prob):
     p = []
     # assume input_op shape is 224x224x3
@@ -87,26 +85,41 @@ def inference_op(input_op, keep_prob):
     conv5_3 = conv_op(conv5_2,  name="conv5_3", kh=3, kw=3, n_out=512, dh=1, dw=1, p=p)
     pool5 = mpool_op(conv5_3,   name="pool5",   kh=2, kw=2, dw=2, dh=2)
 
-    # flatten
+
+    # flatten-- outputs 25088的一维向量,或者说[batch_size,25088]
     shp = pool5.get_shape()
     flattened_shape = shp[1].value * shp[2].value * shp[3].value
     resh1 = tf.reshape(pool5, [-1, flattened_shape], name="resh1")
 
     # fully connected
+    # 因为计算机内存限制,不得不省略参数最多的2个全连接层,将resh1直连到fc8的输入层.
+    # 因为跳过了两个全连接层,相当于dropout也没有使用.
+    '''
+    # 第一个全连接层
     fc6 = fc_op(resh1, name="fc6", n_out=4096, p=p)
     fc6_drop = tf.nn.dropout(fc6, keep_prob, name="fc6_drop")
-
+    
+    # 第二个全连接层
     fc7 = fc_op(fc6_drop, name="fc7", n_out=4096, p=p)
     fc7_drop = tf.nn.dropout(fc7, keep_prob, name="fc7_drop")
-
+    
+    # 第三个全连接层
     fc8 = fc_op(fc7_drop, name="fc8", n_out=1000, p=p)
+    '''
+    fc8 = fc_op(resh1, name="fc8", n_out=1000, p=p)
+
+    # softmax层
     softmax = tf.nn.softmax(fc8)
     predictions = tf.argmax(softmax, 1)
-    return predictions, softmax, fc8, p
-    
-    
 
+    # 定义伪loss,计算梯度
+    objective = tf.nn.l2_loss(fc8)
+    grad = tf.gradients(objective, p)
 
+    return predictions, grad
+# endregion
+
+# region 计算图执行函数
 def time_tensorflow_run(session, target, feed, info_string):
     num_steps_burn_in = 10
     total_duration = 0.0
@@ -126,34 +139,59 @@ def time_tensorflow_run(session, target, feed, info_string):
     sd = math.sqrt(vr)
     print ('%s: %s across %d steps, %.3f +/- %.3f sec / batch' %
            (datetime.now(), info_string, num_batches, mn, sd))
+# endregion
 
+# region 数据预处理
+image_size = 224
+images = tf.Variable(tf.random_normal([batch_size,
+                                       image_size,
+                                       image_size, 3],
+                                      dtype=tf.float32,
+                                      stddev=1e-1))
+# endregion
 
+# region 构建计算图
+keep_prob = tf.placeholder(tf.float32)
+predictions, grad = inference_op(images, keep_prob)
+init = tf.global_variables_initializer()
+# endregion
 
+# region 执行计算图
+sess = tf.Session()
+sess.run(init)
+# 执行伪预测(即测试),所谓前向计算.
+time_tensorflow_run(sess, predictions, {keep_prob: 1.0}, "Forward")
+# 执行伪训练,,所谓反向计算.这里仅计算梯度,忽略更新权重的操作
+time_tensorflow_run(sess, grad, {keep_prob: 0.5}, "Forward-backward")
+# endregion
+
+# 以下在run_benchmark()中建立tf.Graph()功能与上面相同.
+'''
 def run_benchmark():
     with tf.Graph().as_default():
+        
+        # region 数据预处理
         image_size = 224
         images = tf.Variable(tf.random_normal([batch_size,
                                                image_size,
                                                image_size, 3],
                                                dtype=tf.float32,
                                                stddev=1e-1))
+        # endregion
 
+        # region 构建计算图
         keep_prob = tf.placeholder(tf.float32)
-        predictions, softmax, fc8, p = inference_op(images, keep_prob)
-
+        predictions, grad = inference_op(images, keep_prob)
         init = tf.global_variables_initializer()
-
-        config = tf.ConfigProto()
-        config.gpu_options.allocator_type = 'BFC'
-        sess = tf.Session(config=config)
+        # endregion
+        
+        # region 执行计算图
+        sess = tf.Session()
         sess.run(init)
-
         time_tensorflow_run(sess, predictions, {keep_prob:1.0}, "Forward")
-
-        objective = tf.nn.l2_loss(fc8)
-        grad = tf.gradients(objective, p)
         time_tensorflow_run(sess, grad, {keep_prob:0.5}, "Forward-backward")
+        # endregion
 
-batch_size=32
-num_batches=100
 run_benchmark()
+
+'''
